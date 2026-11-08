@@ -64,18 +64,10 @@ classdef IBVS < VisualServo
     pf_V_ref                % Reference Velocity State (2xN) for velocity-level smoothing
     pf_damping_gain         % Damping (A) for inertia
     pf_V_max
-    paper_apf_enabled       % Enable Corke-Hutchinson partitioned IBVS + APF
-    paper_theta_gain        % Gain for optic-axis rotation from line angle
-    paper_sigma_gain        % Gain for z translation from sqrt(area)
-    paper_repulse_gain      % APF eta at the image boundary
-    paper_rho0              % Boundary influence distance in pixels
-    paper_mu                % Discrete smoothing coefficient for Tz
-    paper_tz_min            % Negative Tz clipping, camera retreat
-    paper_tz_max            % Positive Tz clipping, camera approach
-    paper_wz_max            % Absolute clipping for omega_z
-    paper_tz_state          % Smoothed Tz state
-    paper_theta_pair         % Optional fixed point pair [i j] for theta_ij
-    paper_delta_max         % APF-IBVS per-component increment limit (m / rad)
+    apf_enabled             % Enable the APF-IBVS baseline (logarithmic FOV repulsion in the IBVS velocity)
+    apf_k_log               % Logarithmic repulsive gain
+    apf_margin              % Boundary influence distance mu (pixels)
+    apf_delta_max           % Per-component limit of the executed increment without G_t (m / rad)
     mpc_enabled             % Enable MPC-QP front-end for FOV-constrained IBVS
     mpc_horizon             % MPC prediction horizon
     mpc_q_weight            % MPC feature tracking weight
@@ -219,18 +211,10 @@ classdef IBVS < VisualServo
             ibvs.nd_vel_max_delta = [0.012 0.012 0.012 0.0035 0.0035 0.0035]';
             ibvs.legacy_fov_enabled = false;
             ibvs.legacy_fov_margin = 100;
-            ibvs.paper_apf_enabled = false;
-            ibvs.paper_theta_gain = 0.35;
-            ibvs.paper_sigma_gain = 0.01;
-            ibvs.paper_repulse_gain = 5e6;
-            ibvs.paper_rho0 = 50;
-            ibvs.paper_mu = 0.8;
-            ibvs.paper_tz_min = -1.0;
-            ibvs.paper_tz_max = 0.35;
-            ibvs.paper_wz_max = 0.45;
-            ibvs.paper_tz_state = 0;
-            ibvs.paper_theta_pair = [];
-            ibvs.paper_delta_max = 0.05;
+            ibvs.apf_enabled = false;
+            ibvs.apf_k_log = 0.01;
+            ibvs.apf_margin = 50;
+            ibvs.apf_delta_max = 0.05;
             ibvs.mpc_enabled = false;
             ibvs.mpc_horizon = 6;
             ibvs.mpc_q_weight = 10.0;
@@ -293,7 +277,6 @@ classdef IBVS < VisualServo
             vs.nd_first_frame = true;
             vs.nd_first_frame_trigger = false;
             vs.nd_vel_state = [];
-            vs.paper_tz_state = 0;
             vs.mpc_tau_prev = zeros(6,1);
 
             vs.vel_p = [];
@@ -320,20 +303,20 @@ classdef IBVS < VisualServo
             vs.s_ref = [];
             raw_legacy_enabled = logical(~isempty(vs.legacy_fov_enabled) && vs.legacy_fov_enabled);
             raw_pf_enabled = logical(~isempty(vs.pf_enabled) && vs.pf_enabled);
-            raw_paper_enabled = logical(~isempty(vs.paper_apf_enabled) && vs.paper_apf_enabled);
+            raw_apf_enabled = logical(~isempty(vs.apf_enabled) && vs.apf_enabled);
             raw_mpc_enabled = logical(~isempty(vs.mpc_enabled) && vs.mpc_enabled);
-            if nnz([raw_legacy_enabled, raw_pf_enabled, raw_paper_enabled, raw_mpc_enabled]) > 1
+            if nnz([raw_legacy_enabled, raw_pf_enabled, raw_apf_enabled, raw_mpc_enabled]) > 1
                 error('IBVS:ConflictingMethodFlags', ...
                     ['Conflicting method flags are enabled simultaneously. ' ...
-                     'legacy_fov=%d, pf_ndrg=%d, paper_apf=%d, mpc=%d'], ...
-                    raw_legacy_enabled, raw_pf_enabled, raw_paper_enabled, raw_mpc_enabled);
+                     'legacy_fov=%d, pf_ndrg=%d, apf=%d, mpc=%d'], ...
+                    raw_legacy_enabled, raw_pf_enabled, raw_apf_enabled, raw_mpc_enabled);
             end
-            use_paper_frontend = logical(~isempty(vs.paper_apf_enabled) && vs.paper_apf_enabled);
+            use_apf_frontend = logical(~isempty(vs.apf_enabled) && vs.apf_enabled);
             use_mpc_frontend = logical(~isempty(vs.mpc_enabled) && vs.mpc_enabled);
             use_pf_frontend = logical(~isempty(vs.pf_enabled) && vs.pf_enabled) && ...
-                ~use_paper_frontend && ~use_mpc_frontend;
+                ~use_apf_frontend && ~use_mpc_frontend;
             use_legacy_fov = logical(~isempty(vs.legacy_fov_enabled) && vs.legacy_fov_enabled) && ...
-                ~use_paper_frontend && ~use_mpc_frontend && ~use_pf_frontend;
+                ~use_apf_frontend && ~use_mpc_frontend && ~use_pf_frontend;
             legacy_fov_info = [];
             pf_e_for_history = [];
             pf_s_ref_for_history = [];
@@ -435,7 +418,7 @@ classdef IBVS < VisualServo
 
 
    % compute image plane error as a column
-            if use_paper_frontend
+            if use_apf_frontend
                 e = uv(:) - vs.uv_star(:);
             elseif use_pf_frontend
                 e = uv(:) - vs.pf_s_ref(:);
@@ -536,13 +519,11 @@ classdef IBVS < VisualServo
                     ramp = min(1.0, max(0.0, ramp));
                     vs.lambda = vs.lambda_min + (vs.lambda_max - vs.lambda_min) * ramp;
                 end
-                if use_paper_frontend
-                    [Tz_paper, wz_paper, paper_info] = vs.partitioned_apf_z_control(uv, vs.uv_star);
-                    fdot = -vs.lambda * e;
-                    Jxy = J(:, [1 2 4 5]);
-                    Jz = J(:, [3 6]);
-                    rxy = pinv(Jxy) * (fdot - Jz * [Tz_paper; wz_paper]);
-                    v = [rxy(1); rxy(2); Tz_paper; rxy(3); rxy(4); wz_paper];
+                if use_apf_frontend
+                    % APF-IBVS: logarithmic FOV repulsion added to the IBVS camera velocity
+                    F_rep_apf = vs.apf_log_fov_force(uv);
+                    Jplus = pinv(J);
+                    v = -vs.lambda * (Jplus * e) + Jplus * F_rep_apf(:);
                 else
                     v_cmd = -vs.lambda * pinv(J) * e;
                     v = v_cmd;
@@ -584,9 +565,9 @@ classdef IBVS < VisualServo
                 dt_step = 1 / max(vs.fps, 1);
             end
             raw_v_delta = v * dt_step;
-            if use_paper_frontend && ~isempty(vs.paper_delta_max)
-                % APF-IBVS baseline: each increment component limited to paper_delta_max
-                raw_v_delta = min(max(raw_v_delta, -vs.paper_delta_max), vs.paper_delta_max);
+            if use_apf_frontend && ~vs.nd_enabled && ~isempty(vs.apf_delta_max)
+                % APF-IBVS without G_t: each increment component limited to apf_delta_max
+                raw_v_delta = min(max(raw_v_delta, -vs.apf_delta_max), vs.apf_delta_max);
             end
 
   if vs.nd_enabled
@@ -679,9 +660,6 @@ classdef IBVS < VisualServo
                 hist.s_ref_error = [];
             end
             hist.jcond = cond(J);
-            if exist('paper_info','var') && ~isempty(paper_info)
-                hist.paper_info = paper_info;
-            end
             hist.Tcam = vs.Tcam;
             if exist('E_new','var')
                 hist.nd_E = E_new;
@@ -2306,83 +2284,42 @@ classdef IBVS < VisualServo
             d = min([uv(1,:), uv(2,:), imsz(1) - uv(1,:), imsz(2) - uv(2,:)]);
         end
 
-        function [Tz, wz, info] = partitioned_apf_z_control(vs, uv, uv_star)
-            % Corke-Hutchinson partitioned IBVS:
-            % rz=[Tz wz] is controlled by image area and longest-line angle.
-            if ~isempty(vs.paper_theta_pair)
-                idx_i = vs.paper_theta_pair(1);
-                idx_j = vs.paper_theta_pair(2);
-                line_theta = atan2(uv(2,idx_j) - uv(2,idx_i), uv(1,idx_j) - uv(1,idx_i));
-            else
-                [idx_i, idx_j, line_theta] = vs.partitioned_longest_segment(uv);
-            end
-            theta_star = atan2(uv_star(2,idx_j) - uv_star(2,idx_i), uv_star(1,idx_j) - uv_star(1,idx_i));
-            theta_err = atan2(sin(theta_star - line_theta), cos(theta_star - line_theta));
-            % The toolbox camera-pose convention makes positive omega_z move
-            % the image angle in the opposite direction to the paper's sign.
-            wz = -vs.paper_theta_gain * theta_err;
-            wz = min(max(wz, -vs.paper_wz_max), vs.paper_wz_max);
-
-            sigma = vs.partitioned_polygon_sigma(uv);
-            sigma_star = vs.partitioned_polygon_sigma(uv_star);
-            [F, rho_min] = vs.partitioned_boundary_repulsion(uv);
-
-            Tz_demand = vs.paper_sigma_gain * (sigma_star - sigma) - F;
-            Tz_unclipped = vs.paper_mu * vs.paper_tz_state + (1 - vs.paper_mu) * Tz_demand;
-            vs.paper_tz_state = Tz_unclipped;
-            Tz = min(max(Tz_unclipped, vs.paper_tz_min), vs.paper_tz_max);
-
-            info.theta = line_theta;
-            info.theta_star = theta_star;
-            info.theta_err = theta_err;
-            info.sigma = sigma;
-            info.sigma_star = sigma_star;
-            info.repulse = F;
-            info.rho_min = rho_min;
-            info.Tz_unclipped = Tz_unclipped;
-            info.Tz = Tz;
-            info.wz = wz;
-            info.longest_pair = [idx_i idx_j];
-        end
-
-        function sigma = partitioned_polygon_sigma(~, uv)
-            sigma = sqrt(max(polyarea(uv(1,:), uv(2,:)), 0));
-        end
-
-        function [idx_i, idx_j, line_theta] = partitioned_longest_segment(~, uv)
-            n = size(uv, 2);
-            idx_i = 1;
-            idx_j = min(2, n);
-            best_d2 = -inf;
-            for a = 1:n-1
-                for b = a+1:n
-                    d = uv(:,b) - uv(:,a);
-                    d2 = d' * d;
-                    if d2 > best_d2
-                        best_d2 = d2;
-                        idx_i = a;
-                        idx_j = b;
-                    end
+        function f = apf_log_fov_force(vs, uv)
+            % Logarithmic FOV repulsion (pixels), active within apf_margin of an image border
+            W = vs.camera.npix(1);
+            H = vs.camera.npix(2);
+            mu = vs.apf_margin;
+            kr = vs.apf_k_log;
+            f = zeros(size(uv));
+            for p = 1:size(uv, 2)
+                x = uv(1,p); y = uv(2,p);
+                if x < mu
+                    f(1,p) = f(1,p) + vs.apf_axis_repulsion(x, W, mu, kr);
+                end
+                if x > W - mu
+                    f(1,p) = f(1,p) - vs.apf_axis_repulsion(W - x, W, mu, kr);
+                end
+                if y < mu
+                    f(2,p) = f(2,p) + vs.apf_axis_repulsion(y, H, mu, kr);
+                end
+                if y > H - mu
+                    f(2,p) = f(2,p) - vs.apf_axis_repulsion(H - y, H, mu, kr);
                 end
             end
-            line_theta = atan2(uv(2,idx_j) - uv(2,idx_i), uv(1,idx_j) - uv(1,idx_i));
         end
 
-        function [F, rho_min] = partitioned_boundary_repulsion(vs, uv)
-            imsz = vs.camera.npix(:);
-            u = uv(1,:);
-            v = uv(2,:);
-            rho = min([u; v; imsz(1) - u; imsz(2) - v], [], 1);
-            rho = max(rho, 1e-6);
-            rho_min = min(rho);
-            active = rho <= vs.paper_rho0;
-            if any(active)
-                % logarithmic boundary repulsion, zero at rho = rho0
-                Fa = vs.paper_repulse_gain * log(vs.paper_rho0 ./ rho(active));
-                F = max([0 Fa]);
-            else
-                F = 0;
-            end
+        function f = apf_axis_repulsion(~, d, extent, mu, kr)
+            % Negative gradient of the logarithmic barrier along one image axis
+            d = max(1e-6, d);
+            x = d; U = extent;
+            A = log(max((U - x) / mu, realmin));
+            B = log(max(mu / x, realmin));
+            xi = (x - U/2)^2;
+            dxi = 2 * (x - U/2);
+            dA = -1 / max(U - x, 1e-6);
+            dB = -1 / x;
+            dV = dxi * A * B + xi * (dA * B + A * dB);
+            f = -kr * dV;
         end
 
         function [tau, s_ref_pred, exitflag] = mpcqp_controller_pixel(vs, s, s_target, B_jacobian, dt)
