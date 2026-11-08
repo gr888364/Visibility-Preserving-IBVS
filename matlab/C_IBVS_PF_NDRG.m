@@ -120,12 +120,9 @@ function specs = make_method_specs(scene)
         'lambda_max', scene.lambda, 'lambda_exp_rate', 12.0, ...
         'lambda_exp_center', 0.80, 'lambda_ramp_steps', 1, ...
         'legacy_fov_enabled', false, 'legacy_fov_margin', 100, ...
-        'pf_enabled', false, 'paper_apf_enabled', false, 'mpc_enabled', false, ...
+        'pf_enabled', false, 'apf_enabled', false, 'mpc_enabled', false, ...
         'pf_attract_gain', 2.0, 'pf_repulse_gain', 10000.0, 'pf_safety_margin', 50, ...
-        'paper_theta_gain', 0.10, 'paper_sigma_gain', 0.008, ...
-        'paper_repulse_gain', 5e5, 'paper_rho0', 100, 'paper_mu', 0.8, ...
-        'paper_tz_min', -0.6, 'paper_tz_max', 0.25, 'paper_wz_max', 0.10, ...
-        'paper_theta_pair', [1 3], ...
+        'apf_k_log', 0.01, 'apf_margin', 50, 'apf_delta_max', 0.05, ...
         'mpc_horizon', 1, 'mpc_q_weight', eye(numel(scene.pd)) * 1, ...
         'mpc_r_weight', eye(6) * 50, 'mpc_slack_weight', 1e5, ...
         'mpc_v_max', 0.50, 'mpc_w_max', 0.50, 'mpc_fov_margin', 20, ...
@@ -146,20 +143,15 @@ function specs = make_method_specs(scene)
     specs(2).mpc_w_max = 0.25;
     specs(2).mpc_solve_repeats = 20;
 
-    specs(3).key = 'corke';
+    specs(3).key = 'apf';
     specs(3).name = 'APF-IBVS';
     specs(3).short_name = 'APF';
     specs(3).lambda = 0.4;
-    specs(3).paper_apf_enabled = true;
-    specs(3).paper_theta_gain = 0.25;
-    specs(3).paper_sigma_gain = 0.020;
-    specs(3).paper_repulse_gain = 0.01;
-    specs(3).paper_rho0 = 50;
-    specs(3).paper_mu = 0.8;
-    specs(3).paper_tz_min = -0.10;
-    specs(3).paper_tz_max = 1.50;
-    specs(3).paper_wz_max = 0.25;
-    specs(3).paper_theta_pair = [1 3];
+    specs(3).gain_type = 0;          % constant gain
+    specs(3).apf_enabled = true;
+    specs(3).apf_k_log = 0.01;       % logarithmic repulsive gain
+    specs(3).apf_margin = 50;        % boundary influence distance (px)
+    specs(3).apf_delta_max = 0.05;   % increment limit without G_t (m / rad)
 
     specs(4).key = 'pf_ndrg';
     specs(4).name = 'P-IBVS (proposed)';
@@ -201,22 +193,16 @@ function result = run_one_case(spec, scene, dt_seq, use_nd)
     ibvs.nd_enabled = use_nd;
     ibvs.nd_filter_only = false;
     ibvs.pf_enabled = spec.pf_enabled;
-    ibvs.paper_apf_enabled = spec.paper_apf_enabled;
+    ibvs.apf_enabled = spec.apf_enabled;
     ibvs.mpc_enabled = spec.mpc_enabled;
 
     ibvs.pf_attract_gain = spec.pf_attract_gain;
     ibvs.pf_repulse_gain = spec.pf_repulse_gain;
     ibvs.pf_safety_margin = spec.pf_safety_margin;
 
-    ibvs.paper_theta_gain = spec.paper_theta_gain;
-    ibvs.paper_sigma_gain = spec.paper_sigma_gain;
-    ibvs.paper_repulse_gain = spec.paper_repulse_gain;
-    ibvs.paper_rho0 = spec.paper_rho0;
-    ibvs.paper_mu = spec.paper_mu;
-    ibvs.paper_tz_min = spec.paper_tz_min;
-    ibvs.paper_tz_max = spec.paper_tz_max;
-    ibvs.paper_wz_max = spec.paper_wz_max;
-    ibvs.paper_theta_pair = spec.paper_theta_pair;
+    ibvs.apf_k_log = spec.apf_k_log;
+    ibvs.apf_margin = spec.apf_margin;
+    ibvs.apf_delta_max = spec.apf_delta_max;
 
     ibvs.mpc_horizon = spec.mpc_horizon;
     ibvs.mpc_q_weight = spec.mpc_q_weight;
@@ -228,10 +214,10 @@ function result = run_one_case(spec, scene, dt_seq, use_nd)
     ibvs.mpc_solve_repeats = spec.mpc_solve_repeats;
 
     if strcmpi(spec.key, 'classical')
-        % Keep Cheng/OG-VFVR on its own legacy front-end only.
+        % Keep OG-VFVR on its own virtual-feature front-end only.
         ibvs.legacy_fov_enabled = true;
         ibvs.pf_enabled = false;
-        ibvs.paper_apf_enabled = false;
+        ibvs.apf_enabled = false;
         ibvs.mpc_enabled = false;
     end
 
