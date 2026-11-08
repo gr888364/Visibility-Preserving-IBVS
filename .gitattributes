@@ -3,3 +3,5 @@
 *.png binary
 *.gif binary
 *.mp4 binary
+*.cpp text eol=lf
+*.h text eol=lf
