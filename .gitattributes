@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.m text eol=lf linguist-language=MATLAB
+*.png binary
+*.gif binary
+*.mp4 binary

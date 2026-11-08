@@ -1,0 +1,7 @@
+compare_outputs/
+*.asv
+*.mat
+*.fig
+slprj/
+.DS_Store
+Thumbs.db
